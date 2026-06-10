@@ -222,15 +222,12 @@ class ControllerReader(threading.Thread):
         self.throttle = rt_raw
         self.brake = lt_raw
 
-        # Only forward to virtual controller while actively limiting.
-        # When not limiting, the physical controller talks to the game directly —
-        # forwarding would double every button press.
-        actively_limiting = self.sc_enabled and self.throttle_cap < 1.0
-
-        if not actively_limiting:
+        # Forward through virtual whenever SC is on — always, not just when capping.
+        # Toggling in/out of forwarding on slip spikes caused double inputs on
+        # buttons (physical + virtual both firing during the transition frame).
+        if not self.sc_enabled:
             self.output_throttle = rt_raw
             if self._was_forwarding:
-                # Transition: release everything on the virtual controller
                 self._reset_virtual()
                 self._was_forwarding = False
             return
@@ -257,23 +254,10 @@ class ControllerReader(threading.Thread):
         gp.left_trigger_float(value_float=lt_raw)
         gp.right_trigger_float(value_float=rt_out)
 
-        # Buttons
-        if _BTN_MAP:
-            n_btn = js.get_numbuttons()
-            for i, xbtn in enumerate(_BTN_MAP):
-                if i < n_btn and js.get_button(i):
-                    gp.press_button(xbtn)
-                else:
-                    gp.release_button(xbtn)
-
-        # D-pad
-        if js.get_numhats() > 0:
-            hx, hy = js.get_hat(0)
-            _hat(gp, XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP,    hy > 0)
-            _hat(gp, XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN,  hy < 0)
-            _hat(gp, XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT,  hx < 0)
-            _hat(gp, XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT, hx > 0)
-
+        # Buttons and d-pad are intentionally NOT forwarded through virtual.
+        # Forza reads all XInput slots; forwarding buttons here creates a second
+        # rising edge ~10 ms after physical, causing double shifts/inputs.
+        # Physical buttons reach the game directly via their own XInput slot.
         gp.update()
 
     def _reset_virtual(self):
@@ -351,12 +335,23 @@ class StabilityControlApp:
         self.is_limiting = False
         self.packets_received = 0
         self._last_pkt_size = 0
-        self.strength = 1.0       # 0.0–1.0 from the slider
-        self.smoothed_cap = 1.0   # exponentially-smoothed cap value
+        self.strength = 1.0        # 0.0–1.0 from the slider
+        self.permitted_slip = 0.45 # base slip threshold before TC intervenes
+        self.tcr_start = 0.25      # additional offset above permitted_slip to first engage TC
+        self.smoothed_cap = 1.0    # current cap value
+
+        # TC logic diagnostics — updated each packet, read by _refresh_ui
+        self._tc_front_max  = 0.0
+        self._tc_rear_max   = 0.0
+        self._tc_oversteer  = 0.0
+        self._tc_eff_slip   = 0.0
+        self._tc_base_tol   = 1.0
+        self._tc_df_bonus   = 0.0
+        self._tc_t_light    = 1.0
 
         self.root = tk.Tk()
         self.root.title("FH6 Stability Control")
-        self.root.geometry("520x430")
+        self.root.geometry("520x590")
         self.root.resizable(False, False)
 
         self._build_ui()
@@ -413,7 +408,7 @@ class StabilityControlApp:
         sr = ttk.Frame(self.root)
         sr.pack(fill="x", padx=14, pady=(0, 2))
         ttk.Label(sr, text="Strength", foreground="#888888",
-                  font=("Segoe UI", 9)).pack(side="left")
+                  font=("Segoe UI", 9), width=14).pack(side="left")
         self._strength_var = tk.DoubleVar(value=1.0)
         ttk.Scale(sr, from_=0.0, to=1.0, orient="horizontal",
                   variable=self._strength_var,
@@ -422,6 +417,34 @@ class StabilityControlApp:
         self._strength_lbl = ttk.Label(sr, text="100%", width=5,
                                        font=("Courier New", 10))
         self._strength_lbl.pack(side="left")
+
+        # Permitted slip slider
+        ps = ttk.Frame(self.root)
+        ps.pack(fill="x", padx=14, pady=(0, 2))
+        ttk.Label(ps, text="Permitted Slip", foreground="#888888",
+                  font=("Segoe UI", 9), width=14).pack(side="left")
+        self._permitted_slip_var = tk.DoubleVar(value=0.45)
+        ttk.Scale(ps, from_=0.05, to=1.50, orient="horizontal",
+                  variable=self._permitted_slip_var,
+                  command=self._on_permitted_slip_change).pack(
+                      side="left", fill="x", expand=True, padx=(8, 8))
+        self._permitted_slip_lbl = ttk.Label(ps, text="0.45", width=5,
+                                             font=("Courier New", 10))
+        self._permitted_slip_lbl.pack(side="left")
+
+        # TCR start threshold slider
+        ts = ttk.Frame(self.root)
+        ts.pack(fill="x", padx=14, pady=(0, 2))
+        ttk.Label(ts, text="TCR Start", foreground="#888888",
+                  font=("Segoe UI", 9), width=14).pack(side="left")
+        self._tcr_start_var = tk.DoubleVar(value=0.25)
+        ttk.Scale(ts, from_=0.25, to=1.0, orient="horizontal",
+                  variable=self._tcr_start_var,
+                  command=self._on_tcr_start_change).pack(
+                      side="left", fill="x", expand=True, padx=(8, 8))
+        self._tcr_start_lbl = ttk.Label(ts, text="0.25", width=5,
+                                        font=("Courier New", 10))
+        self._tcr_start_lbl.pack(side="left")
 
         sep()
 
@@ -463,6 +486,21 @@ class StabilityControlApp:
         self.v_raw_thr = grid_row(og, "Throttle in",  col=0, row=1)
         self.v_out_thr = grid_row(og, "Throttle out", col=1, row=1)
         self.v_cap     = grid_row(og, "Cap",          col=2, row=1)
+
+        sep()
+
+        # TC logic diagnostics
+        lg = ttk.Frame(self.root)
+        lg.pack(fill="x", padx=14)
+        ttk.Label(lg, text="TC LOGIC", foreground="#888888",
+                  font=("Segoe UI", 8)).grid(row=0, column=0, columnspan=6,
+                                             sticky="w", pady=(0, 2))
+        self.v_front_max = grid_row(lg, "Front slip", col=0, row=1)
+        self.v_rear_max  = grid_row(lg, "Rear slip",  col=1, row=1)
+        self.v_oversteer = grid_row(lg, "Oversteer",  col=2, row=1)
+        self.v_base_tol  = grid_row(lg, "Perm slip",   col=0, row=2)
+        self.v_df_bonus  = grid_row(lg, "DF bonus",   col=1, row=2)
+        self.v_eff_slip  = grid_row(lg, "Eff.slip",   col=2, row=2)
 
         self.limit_lbl = ttk.Label(self.root, text="", style="Warn.TLabel")
         self.limit_lbl.pack(anchor="w", padx=14, pady=(4, 0))
@@ -552,6 +590,14 @@ class StabilityControlApp:
         pct = int(round(self.strength * 100))
         self._strength_lbl.config(text=f"{pct}%")
 
+    def _on_permitted_slip_change(self, _val=None):
+        self.permitted_slip = self._permitted_slip_var.get()
+        self._permitted_slip_lbl.config(text=f"{self.permitted_slip:.2f}")
+
+    def _on_tcr_start_change(self, _val=None):
+        self.tcr_start = self._tcr_start_var.get()
+        self._tcr_start_lbl.config(text=f"{self.tcr_start:.2f}")
+
     def toggle_enabled(self):
         self.enabled = not self.enabled
         if self.enabled:
@@ -569,34 +615,46 @@ class StabilityControlApp:
             self._destroy_virtual_gamepad()
 
     def _compute_cap(self, frame: dict) -> float:
-        slips = [abs(frame.get(k) or 0.0)
-                 for k in ("slip_fl", "slip_fr", "slip_rl", "slip_rr")]
-        max_slip = max(slips)
+        rear_max  = max(abs(frame.get("slip_rl") or 0.0), abs(frame.get("slip_rr") or 0.0))
+        front_max = max(abs(frame.get("slip_fl") or 0.0), abs(frame.get("slip_fr") or 0.0))
+        max_slip  = max(rear_max, front_max)
 
-        # Hard caps at max strength (mirrors original behaviour)
-        if max_slip > 0.8:   raw_cap = 0.35
-        elif max_slip > 0.45: raw_cap = 0.55
-        elif max_slip > 0.2:  raw_cap = 0.75
-        else:                  raw_cap = 1.0
+        # Oversteer penalty: allow up to 0.35 rear-over-front freely,
+        # then boost effective slip so excessive rotation cuts throttle sooner.
+        oversteer = max(0.0, rear_max - front_max - 0.35)
+        effective_slip = max_slip + oversteer * 0.5
+
+        # User-set base tolerance and TCR engagement offset (from sliders).
+        base_tol = self.permitted_slip
+
+        # Speed-based downforce bonus: aerodynamic downforce ∝ v².
+        # High-downforce cars at speed can sustain more slip. Capped at +0.4.
+        speed_ms = frame.get("speed_ms") or frame.get("vel_ms") or 0.0
+        df_bonus = min(0.4, (speed_ms / 80.0) ** 2 * 0.4)
+
+        # TC engages once slip exceeds permitted_slip + tcr_start (+ downforce bonus).
+        t_light  = base_tol + self.tcr_start        + df_bonus
+        t_medium = base_tol + self.tcr_start + 0.25 + df_bonus
+        t_heavy  = base_tol + self.tcr_start + 0.60 + df_bonus
+
+        if effective_slip > t_heavy:    raw_cap = 0.35
+        elif effective_slip > t_medium: raw_cap = 0.55
+        elif effective_slip > t_light:  raw_cap = 0.75
+        else:                           raw_cap = 1.0
+
+        # Store diagnostics for UI display
+        self._tc_front_max = front_max
+        self._tc_rear_max  = rear_max
+        self._tc_oversteer = rear_max - front_max   # raw difference (before deadzone)
+        self._tc_eff_slip  = effective_slip
+        self._tc_base_tol  = base_tol
+        self._tc_df_bonus  = df_bonus
+        self._tc_t_light   = t_light
 
         s = self.strength
-
-        # Scale aggressiveness: at s=1 → raw_cap; at s=0 → 1.0 (no effect)
         target = 1.0 - (1.0 - raw_cap) * s
-
-        # Exponential smoothing toward target.
-        # alpha = s means: at s=1.0 → alpha=1.0 → instant snap (current behaviour).
-        # At lower strengths the cap eases in/out more gradually.
-        # Use a faster alpha when tightening so the car doesn't spin before it kicks in,
-        # and a slower alpha when releasing so throttle comes back smoothly.
-        if target < self.smoothed_cap:           # tightening
-            alpha = s
-        else:                                    # releasing
-            alpha = max(0.0, s * 0.35)           # always slower than tightening
-
-        self.smoothed_cap += alpha * (target - self.smoothed_cap)
-        self.smoothed_cap = max(0.0, min(1.0, self.smoothed_cap))
-        return self.smoothed_cap
+        self.smoothed_cap = target
+        return target
 
     def _handle_packet(self, data: bytes):
         frame = parse_packet(data)
@@ -607,7 +665,13 @@ class StabilityControlApp:
         self._last_pkt_size = len(data)
 
         if self.enabled:
-            cap = self._compute_cap(frame)
+            if not frame.get("is_race_on"):
+                # Menus / paused / car select — release cap immediately so the
+                # virtual controller stops forwarding and double-input stops.
+                self.smoothed_cap = 1.0
+                cap = 1.0
+            else:
+                cap = self._compute_cap(frame)
             self.max_throttle = cap
             self.controller.throttle_cap = cap
             raw = self.controller.throttle
@@ -692,6 +756,19 @@ class StabilityControlApp:
         self.v_raw_thr.set(f"{raw:.3f}")
         self.v_out_thr.set(f"{out:.3f}")
         self.v_cap.set(f"{self.smoothed_cap:.3f}" if self.enabled else "—")
+
+        if self.enabled:
+            self.v_front_max.set(f"{self._tc_front_max:.3f}")
+            self.v_rear_max.set(f"{self._tc_rear_max:.3f}")
+            ov = self._tc_oversteer
+            self.v_oversteer.set(f"{'!' if ov > 0.35 else ' '}{ov:+.3f}")
+            self.v_base_tol.set(f"{self._tc_base_tol:.2f}")
+            self.v_df_bonus.set(f"{self._tc_df_bonus:.3f}")
+            self.v_eff_slip.set(f"{self._tc_eff_slip:.3f}")
+        else:
+            for v in (self.v_front_max, self.v_rear_max, self.v_oversteer,
+                      self.v_base_tol, self.v_df_bonus, self.v_eff_slip):
+                v.set("—")
 
         if self.enabled and self.is_limiting:
             self.limit_lbl.config(text=f"LIMITING  ({raw:.3f} → {out:.3f})")

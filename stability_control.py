@@ -24,8 +24,8 @@ except ImportError:
     pygame = None
 
 PORT = 31000
-SLED_SIZE = 232
-CARDASH_SIZE = 311
+SLED_SIZE   = 232   # sled portion (same as FH5)
+CARDASH_SIZE = 324  # FH6 full packet (FH5 was 311; +12 for CarGroup/SmashableVelDiff/SmashableMass + 1 extra)
 
 # pygame XInput axis indices (Windows, SDL2)
 # Triggers range: -1.0 (released) → 1.0 (fully pressed)
@@ -89,10 +89,13 @@ def parse_packet(data: bytes):
         "speed_ms": None, "tele_throttle": None, "brake": None, "gear": None,
     }
     if len(data) >= CARDASH_SIZE:
-        frame["speed_ms"] = f(244)
-        frame["tele_throttle"] = data[303] / 255.0
-        frame["brake"] = data[304] / 255.0
-        frame["gear"] = data[307]
+        # FH6 offsets: FH5 had Speed@244, Accel@303, Brake@304, Gear@307.
+        # FH6 inserts CarGroup(U32)+SmashableVelDiff(F32)+SmashableMass(F32) = 12 bytes
+        # after NumCylinders@228, so every field from 232 onward shifts by +12.
+        frame["speed_ms"] = f(256)          # Speed (m/s)
+        frame["tele_throttle"] = data[315] / 255.0  # Accel
+        frame["brake"]         = data[316] / 255.0  # Brake
+        frame["gear"]          = data[319]  # plain U8: 0=N, 1-10=gears, 11=R
     return frame
 
 
@@ -349,6 +352,8 @@ class StabilityControlApp:
         self._tc_df_bonus   = 0.0
         self._tc_t_light    = 1.0
 
+
+
         self.root = tk.Tk()
         self.root.title("FH6 Stability Control")
         self.root.geometry("520x590")
@@ -362,7 +367,7 @@ class StabilityControlApp:
             print("WARNING: 'keyboard' module not installed — use the button instead.")
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.root.after(100, self._update_loop)
+        self.root.after(16, self._update_loop)
 
     # ------------------------------------------------------------------ UI
 
@@ -501,7 +506,6 @@ class StabilityControlApp:
         self.v_base_tol  = grid_row(lg, "Perm slip",   col=0, row=2)
         self.v_df_bonus  = grid_row(lg, "DF bonus",   col=1, row=2)
         self.v_eff_slip  = grid_row(lg, "Eff.slip",   col=2, row=2)
-
         self.limit_lbl = ttk.Label(self.root, text="", style="Warn.TLabel")
         self.limit_lbl.pack(anchor="w", padx=14, pady=(4, 0))
 
@@ -632,7 +636,6 @@ class StabilityControlApp:
         speed_ms = frame.get("speed_ms") or frame.get("vel_ms") or 0.0
         df_bonus = min(0.4, (speed_ms / 80.0) ** 2 * 0.4)
 
-        # TC engages once slip exceeds permitted_slip + tcr_start (+ downforce bonus).
         t_light  = base_tol + self.tcr_start        + df_bonus
         t_medium = base_tol + self.tcr_start + 0.25 + df_bonus
         t_heavy  = base_tol + self.tcr_start + 0.60 + df_bonus
@@ -653,8 +656,14 @@ class StabilityControlApp:
 
         s = self.strength
         target = 1.0 - (1.0 - raw_cap) * s
-        self.smoothed_cap = target
-        return target
+
+        # Asymmetric smoothing: cut throttle instantly, restore gradually.
+        if target < self.smoothed_cap:
+            self.smoothed_cap = target          # immediate tightening
+        else:
+            self.smoothed_cap += (target - self.smoothed_cap) * 0.08  # gradual release
+
+        return self.smoothed_cap
 
     def _handle_packet(self, data: bytes):
         frame = parse_packet(data)
@@ -671,7 +680,7 @@ class StabilityControlApp:
                 self.smoothed_cap = 1.0
                 cap = 1.0
             else:
-                cap = self._compute_cap(frame)
+                cap = self._compute_cap(frame)  # smoothed_cap updated inside
             self.max_throttle = cap
             self.controller.throttle_cap = cap
             raw = self.controller.throttle
@@ -689,7 +698,7 @@ class StabilityControlApp:
             except queue.Empty:
                 break
         self._refresh_ui()
-        self.root.after(100, self._update_loop)
+        self.root.after(16, self._update_loop)
 
     def _refresh_ui(self):
         f = self.last_frame
@@ -737,7 +746,7 @@ class StabilityControlApp:
         self.v_speed.set(f"{speed_ms * 3.6:.1f} km/h")
         self.v_rpm.set(f"{f.get('engine_rpm') or 0.0:.0f}")
         gear = f.get("gear")
-        self.v_gear.set(("N" if gear == 0 else "R" if gear == 10 else str(gear))
+        self.v_gear.set(("N" if gear == 0 else "R" if gear == 11 else str(gear))  # 0=N, 1-10=gears, 11=R
                         if gear is not None else "—")
 
         for var, key in ((self.v_slip_fl, "slip_fl"), (self.v_slip_fr, "slip_fr"),

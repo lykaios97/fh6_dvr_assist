@@ -356,7 +356,7 @@ class StabilityControlApp:
 
         self.root = tk.Tk()
         self.root.title("FH6 Stability Control")
-        self.root.geometry("520x590")
+        self.root.geometry("520x640")
         self.root.resizable(False, False)
 
         self._build_ui()
@@ -372,169 +372,206 @@ class StabilityControlApp:
     # ------------------------------------------------------------------ UI
 
     def _build_ui(self):
-        BG, FG = "#1e1e1e", "#e0e0e0"
-        MONO = ("Courier New", 10)
+        BG   = "#0e0e0e"
+        CARD = "#161616"
+        BORD = "#252525"
+        FG   = "#e8e8e8"
+        DIM  = "#484848"
+        BLUE = "#29b6f6"
 
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure("TLabel",        background=BG, foreground=FG)
-        style.configure("Status.TLabel", background=BG, foreground="#4fc3f7",
-                        font=("Segoe UI", 13, "bold"))
-        style.configure("Warn.TLabel",   background=BG, foreground="#ef9a9a",
-                        font=("Segoe UI", 11, "bold"))
-        style.configure("TButton", padding=6)
-        style.configure("TFrame",  background=BG)
-        style.configure("Sep.TFrame", background="#444444")
+        style.configure("TLabel",    background=BG,   foreground=FG, font=("Segoe UI", 9))
+        style.configure("TFrame",    background=BG)
+        style.configure("TButton",   background=BORD, foreground=FG,
+                        font=("Segoe UI", 9, "bold"), padding=(10, 6))
+        style.map("TButton",         background=[("active", "#333333")])
+        style.configure("TScale",    background=CARD, troughcolor=BORD, sliderlength=12)
+        style.configure("TCombobox", fieldbackground=BORD, background=BORD,
+                        foreground=FG, selectbackground=BORD, selectforeground=FG)
         self.root.configure(bg=BG)
 
-        def sep():
-            ttk.Frame(self.root, height=1, style="Sep.TFrame").pack(
-                fill="x", padx=14, pady=5)
+        # ── helpers ─────────────────────────────────────────────────────────
 
-        def grid_row(parent, label, col, row):
-            ttk.Label(parent, text=label, foreground="#888888", font=MONO).grid(
-                row=row, column=col * 2, sticky="w", padx=(0, 4))
-            var = tk.StringVar(value="—")
-            ttk.Label(parent, textvariable=var, font=MONO, foreground=FG).grid(
-                row=row, column=col * 2 + 1, sticky="w", padx=(0, 20))
-            return var
+        def section(title):
+            """Bordered card. Returns the inner content frame."""
+            wrap = tk.Frame(self.root, bg=BORD)
+            wrap.pack(fill="x", padx=12, pady=(0, 6))
+            body = tk.Frame(wrap, bg=CARD)
+            body.pack(fill="x", padx=1, pady=1)
+            hdr = tk.Frame(body, bg=CARD)
+            hdr.pack(fill="x", padx=10, pady=(7, 3))
+            tk.Frame(hdr, bg=BLUE, width=3, height=12).pack(side="left")
+            tk.Label(hdr, text=title, bg=CARD, fg=DIM,
+                     font=("Segoe UI", 7, "bold")).pack(side="left", padx=(6, 0))
+            inner = tk.Frame(body, bg=CARD)
+            inner.pack(fill="x", padx=10, pady=(0, 8))
+            return inner
 
-        # Status + toggle
-        top = ttk.Frame(self.root)
-        top.pack(fill="x", padx=14, pady=(12, 4))
-        self.status_lbl = ttk.Label(top, text="Status: OFF", style="Status.TLabel")
-        self.status_lbl.pack(side="left")
-        self.toggle_btn = ttk.Button(top, text="Turn ON  [F8]", command=self.toggle_enabled)
+        def svar(val="—"):
+            return tk.StringVar(value=val)
+
+        def slider_row(parent, label, var, lo, hi, cmd, init):
+            r = tk.Frame(parent, bg=CARD)
+            r.pack(fill="x", pady=1)
+            tk.Label(r, text=label, bg=CARD, fg=DIM,
+                     font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
+            ttk.Scale(r, from_=lo, to=hi, orient="horizontal",
+                      variable=var, command=cmd).pack(
+                          side="left", fill="x", expand=True, padx=(4, 6))
+            lbl = tk.Label(r, text=init, bg=CARD, fg=FG,
+                           font=("Consolas", 10), width=6, anchor="e")
+            lbl.pack(side="left")
+            return lbl
+
+        def tile(parent, caption):
+            f = tk.Frame(parent, bg="#111111", padx=8, pady=5)
+            f.pack(side="left", expand=True, fill="x", padx=(0, 3))
+            tk.Label(f, text=caption, bg="#111111", fg=DIM,
+                     font=("Segoe UI", 7, "bold")).pack(anchor="w")
+            v = svar()
+            tk.Label(f, textvariable=v, bg="#111111", fg=FG,
+                     font=("Segoe UI", 13, "bold")).pack(anchor="w")
+            return v
+
+        def slip_tile(parent, label):
+            f = tk.Frame(parent, bg="#111111", padx=6, pady=5)
+            f.pack(side="left", expand=True, fill="x", padx=(0, 3))
+            tk.Label(f, text=label, bg="#111111", fg=DIM,
+                     font=("Segoe UI", 7, "bold")).pack(anchor="w")
+            v = svar()
+            lbl = tk.Label(f, textvariable=v, bg="#111111", fg=FG,
+                           font=("Consolas", 11))
+            lbl.pack(anchor="w")
+            return v, lbl
+
+        def bar_row(parent, key, label, default_color):
+            r = tk.Frame(parent, bg=CARD)
+            r.pack(fill="x", pady=2)
+            tk.Label(r, text=label, bg=CARD, fg=DIM,
+                     font=("Segoe UI", 8), width=9, anchor="w").pack(side="left")
+            c = tk.Canvas(r, height=10, bg="#1a1a1a", highlightthickness=0)
+            c.pack(side="left", fill="x", expand=True, padx=(4, 8))
+            c.create_rectangle(0, 0, 0, 10, fill=default_color, outline="", tags="bar")
+            self._bar_canvases[key] = (c, default_color)
+            v = svar()
+            tk.Label(r, textvariable=v, bg=CARD, fg=FG,
+                     font=("Consolas", 10), width=6, anchor="e").pack(side="left")
+            return v
+
+        def diag_cell(parent, caption):
+            f = tk.Frame(parent, bg=CARD)
+            f.pack(side="left", expand=True, fill="x")
+            tk.Label(f, text=caption, bg=CARD, fg=DIM,
+                     font=("Segoe UI", 7)).pack(anchor="w")
+            v = svar()
+            tk.Label(f, textvariable=v, bg=CARD, fg=FG,
+                     font=("Consolas", 10)).pack(anchor="w")
+            return v
+
+        # ── HEADER ──────────────────────────────────────────────────────────
+        hdr = tk.Frame(self.root, bg=BG)
+        hdr.pack(fill="x", padx=14, pady=(12, 8))
+        tk.Label(hdr, text="FH6", bg=BG, fg=BLUE,
+                 font=("Segoe UI", 11, "bold")).pack(side="left")
+        tk.Label(hdr, text=" STABILITY CONTROL", bg=BG, fg=FG,
+                 font=("Segoe UI", 11, "bold")).pack(side="left")
+        self.toggle_btn = ttk.Button(hdr, text="ENABLE  [F8]",
+                                     command=self.toggle_enabled)
         self.toggle_btn.pack(side="right")
+        self.status_lbl = tk.Label(hdr, text="● OFF", bg=BG, fg=DIM,
+                                    font=("Segoe UI", 10, "bold"))
+        self.status_lbl.pack(side="right", padx=(0, 10))
 
-        sep()
+        tk.Frame(self.root, bg=BORD, height=1).pack(fill="x", padx=12, pady=(0, 8))
 
-        # Strength slider
-        sr = ttk.Frame(self.root)
-        sr.pack(fill="x", padx=14, pady=(0, 2))
-        ttk.Label(sr, text="Strength", foreground="#888888",
-                  font=("Segoe UI", 9), width=14).pack(side="left")
-        self._strength_var = tk.DoubleVar(value=1.0)
-        ttk.Scale(sr, from_=0.0, to=1.0, orient="horizontal",
-                  variable=self._strength_var,
-                  command=self._on_strength_change).pack(
-                      side="left", fill="x", expand=True, padx=(8, 8))
-        self._strength_lbl = ttk.Label(sr, text="100%", width=5,
-                                       font=("Courier New", 10))
-        self._strength_lbl.pack(side="left")
-
-        # Permitted slip slider
-        ps = ttk.Frame(self.root)
-        ps.pack(fill="x", padx=14, pady=(0, 2))
-        ttk.Label(ps, text="Permitted Slip", foreground="#888888",
-                  font=("Segoe UI", 9), width=14).pack(side="left")
+        # ── SETTINGS ────────────────────────────────────────────────────────
+        sc = section("SETTINGS")
+        self._strength_var      = tk.DoubleVar(value=1.0)
         self._permitted_slip_var = tk.DoubleVar(value=0.45)
-        ttk.Scale(ps, from_=0.05, to=1.50, orient="horizontal",
-                  variable=self._permitted_slip_var,
-                  command=self._on_permitted_slip_change).pack(
-                      side="left", fill="x", expand=True, padx=(8, 8))
-        self._permitted_slip_lbl = ttk.Label(ps, text="0.45", width=5,
-                                             font=("Courier New", 10))
-        self._permitted_slip_lbl.pack(side="left")
+        self._tcr_start_var     = tk.DoubleVar(value=0.25)
+        self._strength_lbl      = slider_row(sc, "Strength",      self._strength_var,
+                                              0.0,  1.0,  self._on_strength_change,      "100%")
+        self._permitted_slip_lbl = slider_row(sc, "Permitted Slip", self._permitted_slip_var,
+                                              0.05, 1.50, self._on_permitted_slip_change, "0.45")
+        self._tcr_start_lbl     = slider_row(sc, "TCR Start",     self._tcr_start_var,
+                                              0.25, 1.0,  self._on_tcr_start_change,     "0.25")
 
-        # TCR start threshold slider
-        ts = ttk.Frame(self.root)
-        ts.pack(fill="x", padx=14, pady=(0, 2))
-        ttk.Label(ts, text="TCR Start", foreground="#888888",
-                  font=("Segoe UI", 9), width=14).pack(side="left")
-        self._tcr_start_var = tk.DoubleVar(value=0.25)
-        ttk.Scale(ts, from_=0.25, to=1.0, orient="horizontal",
-                  variable=self._tcr_start_var,
-                  command=self._on_tcr_start_change).pack(
-                      side="left", fill="x", expand=True, padx=(8, 8))
-        self._tcr_start_lbl = ttk.Label(ts, text="0.25", width=5,
-                                        font=("Courier New", 10))
-        self._tcr_start_lbl.pack(side="left")
+        # ── TELEMETRY ───────────────────────────────────────────────────────
+        tel = section("TELEMETRY")
+        tiles = tk.Frame(tel, bg=CARD)
+        tiles.pack(fill="x", pady=(0, 6))
+        self.v_speed   = tile(tiles, "SPEED")
+        self.v_rpm     = tile(tiles, "RPM")
+        self.v_gear    = tile(tiles, "GEAR")
+        self.v_brake_t = tile(tiles, "BRAKE")
 
-        sep()
+        slip_row = tk.Frame(tel, bg=CARD)
+        slip_row.pack(fill="x")
+        self.v_slip_fl, self._slip_fl_lbl = slip_tile(slip_row, "FL")
+        self.v_slip_fr, self._slip_fr_lbl = slip_tile(slip_row, "FR")
+        self.v_slip_rl, self._slip_rl_lbl = slip_tile(slip_row, "RL")
+        self.v_slip_rr, self._slip_rr_lbl = slip_tile(slip_row, "RR")
+        self.v_pkt_sz = svar()  # not displayed, kept for compat
 
-        # Telemetry
-        tg = ttk.Frame(self.root)
-        tg.pack(fill="x", padx=14)
-        ttk.Label(tg, text="TELEMETRY", foreground="#888888",
-                  font=("Segoe UI", 8)).grid(row=0, column=0, columnspan=6,
-                                             sticky="w", pady=(0, 2))
-        self.v_speed   = grid_row(tg, "Speed",   col=0, row=1)
-        self.v_rpm     = grid_row(tg, "RPM",     col=1, row=1)
-        self.v_gear    = grid_row(tg, "Gear",    col=2, row=1)
-        self.v_slip_fl = grid_row(tg, "Slip FL", col=0, row=2)
-        self.v_slip_fr = grid_row(tg, "Slip FR", col=1, row=2)
-        self.v_slip_rl = grid_row(tg, "Slip RL", col=0, row=3)
-        self.v_slip_rr = grid_row(tg, "Slip RR", col=1, row=3)
-        self.v_brake_t = grid_row(tg, "Brake",   col=2, row=2)
-        self.v_pkt_sz  = grid_row(tg, "Pkt",     col=2, row=3)
+        # ── THROTTLE / CAP ──────────────────────────────────────────────────
+        self._bar_canvases = {}
+        th = section("THROTTLE / CAP")
+        self.v_ctrl_thr = bar_row(th, "ctrl", "PHYSICAL", "#37474f")
+        self.v_raw_thr  = bar_row(th, "in",   "IN",       "#37474f")
+        self.v_out_thr  = bar_row(th, "out",  "OUT",      "#388e3c")
+        self.v_cap      = bar_row(th, "cap",  "CAP",      "#e65100")
+        self.v_ctrl_brk = svar()  # not in bar, kept for compat
+        self.limit_lbl  = tk.Label(th, text="", bg=CARD, fg="#ef5350",
+                                    font=("Segoe UI", 9, "bold"))
+        self.limit_lbl.pack(anchor="w", pady=(2, 0))
 
-        sep()
+        # ── TC DIAGNOSTICS ──────────────────────────────────────────────────
+        diag = section("TC DIAGNOSTICS")
+        row1 = tk.Frame(diag, bg=CARD)
+        row1.pack(fill="x", pady=(0, 4))
+        row2 = tk.Frame(diag, bg=CARD)
+        row2.pack(fill="x")
+        self.v_front_max = diag_cell(row1, "FRONT SLIP")
+        self.v_rear_max  = diag_cell(row1, "REAR SLIP")
+        self.v_oversteer = diag_cell(row1, "OVERSTEER")
+        self.v_base_tol  = diag_cell(row2, "PERM SLIP")
+        self.v_df_bonus  = diag_cell(row2, "DF BONUS")
+        self.v_eff_slip  = diag_cell(row2, "EFF SLIP")
 
-        # Controller input
-        cg = ttk.Frame(self.root)
-        cg.pack(fill="x", padx=14)
-        ttk.Label(cg, text="CONTROLLER (physical)", foreground="#888888",
-                  font=("Segoe UI", 8)).grid(row=0, column=0, columnspan=6,
-                                             sticky="w", pady=(0, 2))
-        self.v_ctrl_thr  = grid_row(cg, "RT throttle", col=0, row=1)
-        self.v_ctrl_brk  = grid_row(cg, "LT brake",    col=1, row=1)
-
-        sep()
-
-        # Virtual controller output
-        og = ttk.Frame(self.root)
-        og.pack(fill="x", padx=14)
-        ttk.Label(og, text="VIRTUAL CONTROLLER OUTPUT", foreground="#888888",
-                  font=("Segoe UI", 8)).grid(row=0, column=0, columnspan=6,
-                                             sticky="w", pady=(0, 2))
-        self.v_raw_thr = grid_row(og, "Throttle in",  col=0, row=1)
-        self.v_out_thr = grid_row(og, "Throttle out", col=1, row=1)
-        self.v_cap     = grid_row(og, "Cap",          col=2, row=1)
-
-        sep()
-
-        # TC logic diagnostics
-        lg = ttk.Frame(self.root)
-        lg.pack(fill="x", padx=14)
-        ttk.Label(lg, text="TC LOGIC", foreground="#888888",
-                  font=("Segoe UI", 8)).grid(row=0, column=0, columnspan=6,
-                                             sticky="w", pady=(0, 2))
-        self.v_front_max = grid_row(lg, "Front slip", col=0, row=1)
-        self.v_rear_max  = grid_row(lg, "Rear slip",  col=1, row=1)
-        self.v_oversteer = grid_row(lg, "Oversteer",  col=2, row=1)
-        self.v_base_tol  = grid_row(lg, "Perm slip",   col=0, row=2)
-        self.v_df_bonus  = grid_row(lg, "DF bonus",   col=1, row=2)
-        self.v_eff_slip  = grid_row(lg, "Eff.slip",   col=2, row=2)
-        self.limit_lbl = ttk.Label(self.root, text="", style="Warn.TLabel")
-        self.limit_lbl.pack(anchor="w", padx=14, pady=(4, 0))
-
-        sep()
-
-        self.status_bar = ttk.Label(self.root, text="Waiting for packets...",
-                                    wraplength=490, foreground="#666666",
-                                    font=("Segoe UI", 9))
-        self.status_bar.pack(anchor="w", padx=14)
-
-        self.vgp_status_lbl = ttk.Label(
-            self.root,
-            text="Virtual controller: disconnected (turn SC ON to connect)",
-            foreground="#888888", font=("Segoe UI", 9))
-        self.vgp_status_lbl.pack(anchor="w", padx=14, pady=(1, 0))
-
-        ctrl_row = ttk.Frame(self.root)
-        ctrl_row.pack(anchor="w", padx=14, pady=(1, 8))
-        self.ctrl_status_lbl = ttk.Label(ctrl_row, text="Detecting controller...",
-                                         foreground="#888888", font=("Segoe UI", 9))
+        # ── FOOTER ──────────────────────────────────────────────────────────
+        tk.Frame(self.root, bg=BORD, height=1).pack(fill="x", padx=12, pady=(2, 6))
+        foot = tk.Frame(self.root, bg=BG)
+        foot.pack(fill="x", padx=14, pady=(0, 8))
+        self.status_bar = tk.Label(foot, text="Waiting for packets...",
+                                    bg=BG, fg=DIM, font=("Segoe UI", 8), anchor="w")
+        self.status_bar.pack(fill="x")
+        self.vgp_status_lbl = tk.Label(foot, text="Virtual controller: disconnected",
+                                        bg=BG, fg=DIM, font=("Segoe UI", 8), anchor="w")
+        self.vgp_status_lbl.pack(fill="x")
+        ctrl_row = tk.Frame(foot, bg=BG)
+        ctrl_row.pack(fill="x", pady=(3, 0))
+        self.ctrl_status_lbl = tk.Label(ctrl_row, text="Detecting controller...",
+                                         bg=BG, fg=DIM, font=("Segoe UI", 8))
         self.ctrl_status_lbl.pack(side="left")
-
         self._joy_var = tk.StringVar(value="Auto")
         self._joy_combo = ttk.Combobox(ctrl_row, textvariable=self._joy_var,
-                                       width=28, state="readonly")
-        self._joy_combo.pack(side="left", padx=(8, 4))
+                                       width=24, state="readonly")
+        self._joy_combo.pack(side="left", padx=(6, 4))
         self._joy_combo.bind("<<ComboboxSelected>>", self._on_joy_select)
         ttk.Button(ctrl_row, text="Rescan",
                    command=self._rescan_controllers).pack(side="left")
+
+    def _set_bar(self, key, value, color=None):
+        if key not in self._bar_canvases:
+            return
+        c, default = self._bar_canvases[key]
+        w = c.winfo_width()
+        if w <= 1:
+            w = 240
+        fill_w = int(_clamp(value, 0.0, 1.0) * w)
+        c.coords("bar", 0, 0, fill_w, 10)
+        c.itemconfig("bar", fill=color or default)
 
     # ------------------------------------------------------------------ controller select
 
@@ -704,11 +741,11 @@ class StabilityControlApp:
         f = self.last_frame
 
         if self.enabled:
-            self.status_lbl.config(text="Status: ON", foreground="#66bb6a")
-            self.toggle_btn.config(text="Turn OFF  [F8]")
+            self.status_lbl.config(text="● ON",  foreground="#4caf50")
+            self.toggle_btn.config(text="DISABLE  [F8]")
         else:
-            self.status_lbl.config(text="Status: OFF", foreground="#4fc3f7")
-            self.toggle_btn.config(text="Turn ON  [F8]")
+            self.status_lbl.config(text="● OFF", foreground="#484848")
+            self.toggle_btn.config(text="ENABLE  [F8]")
 
         if self.virtual_gamepad is not None:
             self.vgp_status_lbl.config(
@@ -743,16 +780,23 @@ class StabilityControlApp:
             return
 
         speed_ms = f.get("speed_ms") or f.get("vel_ms") or 0.0
-        self.v_speed.set(f"{speed_ms * 3.6:.1f} km/h")
+        self.v_speed.set(f"{speed_ms * 3.6:.0f} km/h")
         self.v_rpm.set(f"{f.get('engine_rpm') or 0.0:.0f}")
         gear = f.get("gear")
         self.v_gear.set(("N" if gear == 0 else "R" if gear == 11 else str(gear))  # 0=N, 1-10=gears, 11=R
                         if gear is not None else "—")
 
-        for var, key in ((self.v_slip_fl, "slip_fl"), (self.v_slip_fr, "slip_fr"),
-                         (self.v_slip_rl, "slip_rl"), (self.v_slip_rr, "slip_rr")):
+        slip_pairs = (
+            (self.v_slip_fl, self._slip_fl_lbl, "slip_fl"),
+            (self.v_slip_fr, self._slip_fr_lbl, "slip_fr"),
+            (self.v_slip_rl, self._slip_rl_lbl, "slip_rl"),
+            (self.v_slip_rr, self._slip_rr_lbl, "slip_rr"),
+        )
+        for var, widget, key in slip_pairs:
             s = f.get(key)
-            var.set((f"{'!' if abs(s) > 0.2 else ' '}{s:+.3f}") if s is not None else "—")
+            var.set(f"{s:+.3f}" if s is not None else "—")
+            av = abs(s) if s is not None else 0.0
+            widget.config(fg="#4caf50" if av < 0.2 else "#ffa726" if av < 0.5 else "#ef5350")
 
         brake = f.get("brake")
         self.v_brake_t.set(f"{brake:.2f}" if brake is not None else "—(Sled)")
@@ -765,6 +809,14 @@ class StabilityControlApp:
         self.v_raw_thr.set(f"{raw:.3f}")
         self.v_out_thr.set(f"{out:.3f}")
         self.v_cap.set(f"{self.smoothed_cap:.3f}" if self.enabled else "—")
+
+        ctrl_val = self.controller.throttle if self.controller.available else 0.0
+        self._set_bar("ctrl", ctrl_val)
+        self._set_bar("in",   raw)
+        self._set_bar("out",  out,
+                      "#ef5350" if self.is_limiting else "#388e3c")
+        self._set_bar("cap",  self.smoothed_cap if self.enabled else 0.0,
+                      "#e65100" if self.enabled and self.smoothed_cap < 0.99 else "#388e3c")
 
         if self.enabled:
             self.v_front_max.set(f"{self._tc_front_max:.3f}")
